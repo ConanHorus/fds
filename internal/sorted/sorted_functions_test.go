@@ -96,6 +96,41 @@ func TestGallopingSearchInt_Table(t *testing.T) {
 	}
 }
 
+func TestGallopingSearchInt_LargeSlice(t *testing.T) {
+	t.Parallel()
+
+	// Create a large slice (>64 elements) to trigger galloping behavior
+	size := 1000
+	slice := make([]int, size)
+	for i := range slice {
+		slice[i] = i * 2 // Even numbers: 0, 2, 4, 6, ..., 1998
+	}
+
+	testCases := []struct {
+		target        int
+		expectedIndex int
+		expectedOK    bool
+	}{
+		{target: 0, expectedIndex: 0, expectedOK: true},       // First element
+		{target: 200, expectedIndex: 100, expectedOK: true},   // Middle element
+		{target: 500, expectedIndex: 250, expectedOK: true},   // Another middle element
+		{target: 1998, expectedIndex: 999, expectedOK: true},  // Last element
+		{target: 1000, expectedIndex: 500, expectedOK: true},  // Element that triggers galloping
+		{target: 1, expectedIndex: 1, expectedOK: false},      // Missing (between 0 and 2)
+		{target: 1999, expectedIndex: 1000, expectedOK: false}, // Missing (after last)
+		{target: -1, expectedIndex: 0, expectedOK: false},     // Missing (before first)
+	}
+
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("target=%d", tc.target), func(t *testing.T) {
+			and := assertions.New(t)
+			index, ok := GallopingSearchInt(slice, tc.target)
+			and.So(index, assertions.ShouldEqual, tc.expectedIndex)
+			and.So(ok, assertions.ShouldEqual, tc.expectedOK)
+		})
+	}
+}
+
 func BenchmarkBinarySearchInt(b *testing.B) {
 	slice := make([]int, 1<<16)
 	for i := range slice {

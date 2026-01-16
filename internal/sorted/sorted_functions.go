@@ -70,7 +70,8 @@ func GallopingSearchInt[T Sortable](slice []T, target T) (index int, found bool)
 		currentIndex := prevIndex + spanSize
 		if currentIndex < 0 || currentIndex >= len(slice) {
 			currentIndex = len(slice) - 1
-			return BinarySearchInt(slice[prevIndex:currentIndex+1], target)
+			index, found := BinarySearchInt(slice[prevIndex:currentIndex+1], target)
+			return index + prevIndex, found
 		}
 
 		if slice[currentIndex] < target {
@@ -79,7 +80,8 @@ func GallopingSearchInt[T Sortable](slice []T, target T) (index int, found bool)
 			continue
 		}
 
-		return BinarySearchInt(slice[prevIndex:currentIndex+1], target)
+		index, found := BinarySearchInt(slice[prevIndex:currentIndex+1], target)
+		return index + prevIndex, found
 	}
 }
 
