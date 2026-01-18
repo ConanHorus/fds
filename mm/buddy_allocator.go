@@ -62,8 +62,11 @@ func NewBuddyAllocator(options ...BuddyAllocatorOption) *BuddyAllocator {
 		state.Capacity = 1 << state.MaxOrder
 	}
 
-	// Align capacity to be multiple of largest block size.
-	state.Capacity = (state.Capacity + (1<<state.MaxOrder - 1)) & ^(1<<state.MaxOrder - 1)
+	// Align capacity to be multiple of largest block size with overflow protection.
+	blockSize := uint64(1) << state.MaxOrder
+	if blockSize > 0 && state.Capacity <= ^uint64(0)-blockSize {
+		state.Capacity = (state.Capacity + blockSize - 1) & ^(blockSize - 1)
+	}
 
 	freeLists := make([][]uint64, state.MaxOrder+1)
 	for index := uint64(0); index < state.Capacity; index += uint64(1) << state.MaxOrder {
@@ -83,14 +86,23 @@ func NewBuddyAllocator(options ...BuddyAllocatorOption) *BuddyAllocator {
 // unless a maximum order has been set and the request exceeds it, in which case
 // it will fail.
 //
+// Examples:
+//   - Allocate(1) allocates a 1-unit block
+//   - Allocate(5) allocates an 8-unit block (rounded up to next power of 2)
+//   - Allocate(0) returns failure
+//
 // Parameters:
-//   - size: The size of the memory block to allocate.
+//   - size: The size of the memory block to allocate (must be > 0)
 //
 // Returns:
-//   - index: The starting index of the allocated memory block.
-//   - grew: A boolean indicating whether the allocator had to grow its memory.
-//   - ok: A boolean indicating whether the allocation was successful.
+//   - index: The starting index of the allocated memory block
+//   - grew: A boolean indicating whether the allocator had to grow its memory
+//   - ok: A boolean indicating whether the allocation was successful
 func (this *BuddyAllocator) Allocate(size uint64) (index uint64, grew bool, ok bool) {
+	if size == 0 {
+		return 0, false, false
+	}
+
 	requiredOrder := orderOf(size)
 	if requiredOrder > this.state.MaxOrder {
 		if this.state.MaxOrderSet {
@@ -110,7 +122,7 @@ func (this *BuddyAllocator) Allocate(size uint64) (index uint64, grew bool, ok b
 
 			for currentOrder := order; currentOrder > requiredOrder; currentOrder-- {
 				buddyIndex := index + (uint64(1) << (currentOrder - 1))
-				this.freeLists[currentOrder-1] = sorted.InsertInt(this.freeLists[currentOrder-1], buddyIndex, false)
+				this.freeLists[currentOrder-1] = sorted.Insert(this.freeLists[currentOrder-1], buddyIndex, false)
 			}
 
 			this.used += size
@@ -162,50 +174,66 @@ func (this *BuddyAllocator) Efficiency() contracts.Percent {
 // It attempts to merge the freed block with its buddy blocks to minimize
 // fragmentation.
 //
+// Examples:
+//   - Free(0, 1) frees a 1-unit block starting at index 0
+//   - Free(8, 4) frees a 4-unit block starting at index 8
+//
 // Parameters:
-//   - index: The starting index of the memory block to free.
-//   - size: The size of the memory block to free.
+//   - index: The starting index of the memory block to free (must be < Capacity)
+//   - size: The size of the memory block to free (must be > 0)
 //
 // Returns:
 //   - ok: A boolean indicating whether the free operation was successful. A
-//     false signal on ok is an exceptional case indicating an invalid free
-//     operation (e.g., double free).
+//     false signal indicates an invalid free operation (e.g., double free,
+//     invalid index, or invalid size)
 func (this *BuddyAllocator) Free(index uint64, size uint64) (ok bool) {
+	if size == 0 {
+		return false
+	}
+
 	if index >= this.state.Capacity {
 		return false
 	}
 
-	for currentOrder := uint8(0); currentOrder <= this.state.MaxOrder; currentOrder++ {
-		if _, found := sorted.GallopingSearchInt(this.freeLists[currentOrder], index); found {
-			return false
+	requiredOrder := orderOf(size)
+	blockSize := uint64(1) << requiredOrder
+
+	if index%blockSize != 0 {
+		return false
+	}
+
+	endIndex := index + blockSize - 1
+	for order := uint8(0); order <= this.state.MaxOrder; order++ {
+		orderSize := uint64(1) << order
+		for _, freeIndex := range this.freeLists[order] {
+			freeEnd := freeIndex + orderSize - 1
+			if !(endIndex < freeIndex || index > freeEnd) {
+				return false // Overlapping with existing free block
+			}
 		}
 	}
 
-	requiredOrder := orderOf(size)
 	this.used -= size
-
 	currentIndex := index
+
 	for currentOrder := requiredOrder; currentOrder < this.state.MaxOrder; currentOrder++ {
-		if currentIndex%(uint64(1)<<(currentOrder+1)) != 0 {
-			return false
+		buddySize := uint64(1) << currentOrder
+		if currentIndex%(buddySize*2) != 0 {
+			this.freeLists[currentOrder] = sorted.Insert(this.freeLists[currentOrder], currentIndex, false)
+			return true
 		}
 
-		buddyIndex := currentIndex ^ (uint64(1) << currentOrder)
-		buddyFound := false
-
-		if index, found := sorted.GallopingSearchInt(this.freeLists[currentOrder], buddyIndex); found {
-			this.freeLists[currentOrder] = append(this.freeLists[currentOrder][:index], this.freeLists[currentOrder][index+1:]...)
+		buddyIndex := currentIndex ^ buddySize
+		if buddyIndexPos, found := sorted.GallopingSearch(this.freeLists[currentOrder], buddyIndex); found {
+			this.freeLists[currentOrder] = append(this.freeLists[currentOrder][:buddyIndexPos], this.freeLists[currentOrder][buddyIndexPos+1:]...)
 			currentIndex = min(currentIndex, buddyIndex)
-			buddyFound = true
-		}
-
-		if !buddyFound {
-			this.freeLists[currentOrder] = sorted.InsertInt(this.freeLists[currentOrder], currentIndex, false)
+		} else {
+			this.freeLists[currentOrder] = sorted.Insert(this.freeLists[currentOrder], currentIndex, false)
 			return true
 		}
 	}
 
-	this.freeLists[this.state.MaxOrder] = sorted.InsertInt(this.freeLists[this.state.MaxOrder], currentIndex, false)
+	this.freeLists[this.state.MaxOrder] = sorted.Insert(this.freeLists[this.state.MaxOrder], currentIndex, false)
 	return true
 }
 
@@ -223,11 +251,19 @@ func (this *BuddyAllocator) grow() uint64 {
 	newMemoryIndex := this.state.Capacity
 	newMemorySize := max((uint64(1) << this.state.MaxOrder), 8)
 	newMemoryOrder := orderOf(newMemorySize)
+
+	if this.state.Capacity > ^uint64(0)-newMemorySize {
+		return this.state.Capacity
+	}
+
 	newCapacity := this.state.Capacity + newMemorySize
 	this.state.Capacity = newCapacity
 
 	if !this.state.MaxOrderSet {
-		this.state.MaxOrder = orderOf(newCapacity)
+		newMaxOrder := orderOf(newCapacity)
+		if newMaxOrder < 64 {
+			this.state.MaxOrder = newMaxOrder
+		}
 	}
 
 	if uint8(len(this.freeLists)) <= this.state.MaxOrder {
@@ -236,16 +272,31 @@ func (this *BuddyAllocator) grow() uint64 {
 		this.freeLists = newFreeLists
 	}
 
-	this.freeLists[newMemoryOrder] = append(this.freeLists[newMemoryOrder], newMemoryIndex)
+	if newMemoryOrder <= this.state.MaxOrder {
+		this.freeLists[newMemoryOrder] = append(this.freeLists[newMemoryOrder], newMemoryIndex)
+	}
+
 	return this.state.Capacity
 }
 
 // --- private functions --- //
 
+// orderOf calculates the minimum order (power of 2) needed to accommodate the given size.
+//
+// Examples:
+//   - orderOf(1) returns 0 (needs 2^0 = 1)
+//   - orderOf(3) returns 2 (needs 2^2 = 4)
+//   - orderOf(8) returns 3 (needs 2^3 = 8)
+//
+// Parameters:
+//   - size: The requested size (must be > 0 for meaningful results)
+//
+// Returns:
+//   - The minimum order that provides at least 'size' units
 func orderOf(size uint64) uint8 {
-	if size == 0 {
+	if size <= 1 {
 		return 0
 	}
 
-	return uint8(bits.Len64(size) - 1)
+	return uint8(bits.Len64(size - 1))
 }
