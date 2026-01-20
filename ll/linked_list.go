@@ -94,13 +94,17 @@ func NewLinkedListFromSlice[T comparable](slice []T) *LinkedList[T] {
 
 func newLinkedList[T comparable](capacity int) *LinkedList[T] {
 	allocator := *mm.NewBuddyAllocator(mm.WithInitialCapacity(uint64(capacity)), mm.WithMaxOrder(3))
+	nodes := make([]_ll.Node, allocator.Capacity())
+	for i := 0; i < len(nodes); i++ {
+		nodes[i].Index = -1
+	}
 
 	return &LinkedList[T]{
 		headIndex: -1,
 		tailIndex: -1,
 		length:    0,
 
-		nodes:  make([]_ll.Node, allocator.Capacity()),
+		nodes:  nodes,
 		values: make([]T, allocator.Capacity()),
 
 		allocator: allocator,
@@ -124,7 +128,7 @@ func newLinkedList[T comparable](capacity int) *LinkedList[T] {
 //   - An iter.Seq[T] that yields each value in order.
 func (this *LinkedList[T]) All() iter.Seq[T] {
 	return func(yield func(T) bool) {
-		for _, innerIndex := range this.allIndexes(!this.crystallized) {
+		for _, innerIndex := range this.allIndexesForward(!this.crystallized) {
 			if !yield(this.values[innerIndex]) {
 				return
 			}
@@ -145,7 +149,7 @@ func (this *LinkedList[T]) All() iter.Seq[T] {
 //   - An iter.Seq2[int, T] that yields each index and value in order.
 func (this *LinkedList[T]) AllIndexed() iter.Seq2[int, T] {
 	return func(yield func(int, T) bool) {
-		for outerIndex, innerIndex := range this.allIndexes(!this.crystallized) {
+		for outerIndex, innerIndex := range this.allIndexesForward(!this.crystallized) {
 			if !yield(outerIndex, this.values[innerIndex]) {
 				return
 			}
@@ -175,7 +179,7 @@ func (this *LinkedList[T]) Clear() {
 // Returns:
 //   - ok: true if the value is found, false otherwise.
 func (this *LinkedList[T]) Contains(value T) (ok bool) {
-	for _, innerIndex := range this.allIndexes(!this.crystallized) {
+	for _, innerIndex := range this.allIndexesForward(!this.crystallized) {
 		if this.values[innerIndex] == value {
 			return true
 		}
@@ -204,25 +208,18 @@ func (this *LinkedList[T]) Contains(value T) (ok bool) {
 //   - Call before serialization or benchmarking
 //   - Not needed if incremental untangling is sufficient
 func (this *LinkedList[T]) Crystalize() {
-	done := false
-	for !done {
-		done = true
-		outerIndex := 0
-		innerIndex := this.headIndex
-		for innerIndex != nilIndex {
-			if outerIndex > 0 {
-				previousIndex := this.nodes[innerIndex].PreviousIndex
-				if previousIndex > innerIndex {
-					this.swapNodes(previousIndex, innerIndex)
-					innerIndex = previousIndex
-					done = false
-					break
-				}
-			}
-
-			innerIndex = this.nodes[innerIndex].NextIndex
-			outerIndex++
+	insertAt := 0
+	at := this.headIndex
+	for at != nilIndex {
+		if at == insertAt {
+			at = this.nodes[insertAt].NextIndex
+			insertAt++
+			continue
 		}
+
+		this.swapNodes(insertAt, at)
+		at = this.nodes[insertAt].NextIndex
+		insertAt++
 	}
 
 	this.crystallized = true
@@ -238,7 +235,7 @@ func (this *LinkedList[T]) Crystalize() {
 //   - delegate: A function called for each value. Return true to continue
 //     iteration, false to stop.
 func (this *LinkedList[T]) ForEach(delegate func(value T) (ok bool)) {
-	for _, innerIndex := range this.allIndexes(!this.crystallized) {
+	for _, innerIndex := range this.allIndexesForward(!this.crystallized) {
 		if !delegate(this.values[innerIndex]) {
 			return
 		}
@@ -255,7 +252,7 @@ func (this *LinkedList[T]) ForEach(delegate func(value T) (ok bool)) {
 //   - delegate: A function called for each index-value pair. Return true to
 //     continue iteration, false to stop.
 func (this *LinkedList[T]) ForEachIndexed(delegate func(index int, value T) (ok bool)) {
-	for outerIndex, innerIndex := range this.allIndexes(!this.crystallized) {
+	for outerIndex, innerIndex := range this.allIndexesForward(!this.crystallized) {
 		if !delegate(outerIndex, this.values[innerIndex]) {
 			return
 		}
@@ -296,7 +293,6 @@ func (this *LinkedList[T]) Get(index int) (value T, ok bool) {
 // Returns:
 //   - ok: true if the insertion succeeded, false if the index is out of range.
 func (this *LinkedList[T]) InsertAt(index int, value T) (ok bool) {
-	this.crystallized = false
 	if index < 0 || index > this.length {
 		return false
 	}
@@ -335,7 +331,7 @@ func (this *LinkedList[T]) InsertAt(index int, value T) (ok bool) {
 // Returns:
 //   - index: The zero-based index of the first occurrence, or -1 if not found.
 func (this *LinkedList[T]) IndexOf(value T) (index int) {
-	for outerIndex, innerIndex := range this.allIndexes(!this.crystallized) {
+	for outerIndex, innerIndex := range this.allIndexesForward(!this.crystallized) {
 		if this.values[innerIndex] == value {
 			return outerIndex
 		}
@@ -433,6 +429,8 @@ func (this *LinkedList[T]) RemoveAt(index int) (value T, ok bool) {
 		this.tailIndex = prevIndex
 	}
 
+	this.nodes[innerIndex].Index = -1
+	this.values[innerIndex] = *new(T)
 	this.allocator.Free(uint64(innerIndex), 1)
 	this.length--
 	return value, true
@@ -455,7 +453,6 @@ func (this *LinkedList[T]) RemoveAt(index int) (value T, ok bool) {
 //   - ok: true if the operation succeeded, false if the index is out of range.
 func (this *LinkedList[T]) Set(index int, value T) (ok bool) {
 	if index == -1 {
-		this.crystallized = false
 		index := this.allocateNode(value)
 		if this.tailIndex == nilIndex {
 			this.headIndex = index
@@ -471,7 +468,6 @@ func (this *LinkedList[T]) Set(index int, value T) (ok bool) {
 	}
 
 	if index == this.length {
-		this.crystallized = false
 		index := this.allocateNode(value)
 		if this.headIndex == nilIndex {
 			this.headIndex = index
@@ -547,6 +543,7 @@ func (this *LinkedList[T]) allocateNode(value T) (index int) {
 	}
 
 	if grew {
+		oldCapacity := len(this.nodes)
 		newCapacity := this.allocator.Capacity()
 		newNodes := make([]_ll.Node, newCapacity)
 		newValues := make([]T, newCapacity)
@@ -554,6 +551,10 @@ func (this *LinkedList[T]) allocateNode(value T) (index int) {
 		copy(newValues, this.values)
 		this.nodes = newNodes
 		this.values = newValues
+
+		for i := oldCapacity; i < len(this.nodes); i++ {
+			this.nodes[i].Index = -1
+		}
 	}
 
 	index = int(allocationIndex)
@@ -573,16 +574,39 @@ func (this *LinkedList[T]) fromOuterIndexToInner(index int, untangle bool) (out 
 		return -1
 	}
 
-	for outerIndex, innerIndex := range this.allIndexes(untangle) {
-		if outerIndex == index {
-			return innerIndex
+	if this.crystallized {
+		return index
+	}
+
+	mid := this.length / 2
+	if index <= mid {
+		for outerIndex, innerIndex := range this.allIndexesForward(untangle) {
+			if outerIndex == index {
+				return innerIndex
+			}
+		}
+	} else {
+		for outerIndex, innerIndex := range this.allIndexesReverse(untangle) {
+			if outerIndex == index {
+				return innerIndex
+			}
 		}
 	}
 
 	return -1
 }
 
-func (this *LinkedList[T]) allIndexes(untangle bool) iter.Seq2[int, int] {
+func (this *LinkedList[T]) allIndexesForward(untangle bool) iter.Seq2[int, int] {
+	if this.crystallized {
+		return func(yield func(int, int) bool) {
+			for i := 0; i < this.length; i++ {
+				if !yield(i, i) {
+					return
+				}
+			}
+		}
+	}
+
 	return func(yield func(int, int) bool) {
 		outerIndex := 0
 		innerIndex := this.headIndex
@@ -594,7 +618,7 @@ func (this *LinkedList[T]) allIndexes(untangle bool) iter.Seq2[int, int] {
 			if untangle && outerIndex > 0 {
 				previousIndex := this.nodes[innerIndex].PreviousIndex
 				if previousIndex > innerIndex {
-					this.swapNodes(previousIndex, innerIndex)
+					this.swapInUseNodes(previousIndex, innerIndex)
 					innerIndex = previousIndex
 					untangle = false
 				}
@@ -610,7 +634,91 @@ func (this *LinkedList[T]) allIndexes(untangle bool) iter.Seq2[int, int] {
 	}
 }
 
+func (this *LinkedList[T]) allIndexesReverse(untangle bool) iter.Seq2[int, int] {
+	if this.crystallized {
+		return func(yield func(int, int) bool) {
+			for i := this.length - 1; i >= 0; i-- {
+				if !yield(i, i) {
+					return
+				}
+			}
+		}
+	}
+
+	return func(yield func(int, int) bool) {
+		outerIndex := this.length - 1
+		innerIndex := this.tailIndex
+		if innerIndex == nilIndex {
+			return
+		}
+
+		for innerIndex != nilIndex {
+			if untangle && outerIndex > 0 {
+				previousIndex := this.nodes[innerIndex].PreviousIndex
+				if previousIndex < innerIndex {
+					this.swapInUseNodes(previousIndex, innerIndex)
+					innerIndex = previousIndex
+					untangle = false
+				}
+			}
+
+			if !yield(outerIndex, innerIndex) {
+				return
+			}
+
+			innerIndex = this.nodes[innerIndex].PreviousIndex
+			outerIndex--
+		}
+	}
+}
+
+func (this *LinkedList[T]) moveNodeToLocation(fromIndex int, toIndex int) {
+	this.crystallized = false
+
+	this.allocator.Free(uint64(fromIndex), 1)
+	if !this.allocator.AllocateAt(uint64(toIndex), 1) {
+		panic("failed to allocate at specific location during compaction")
+	}
+
+	this.nodes[toIndex] = this.nodes[fromIndex]
+	this.nodes[toIndex].Index = toIndex
+	this.values[toIndex] = this.values[fromIndex]
+
+	if this.nodes[toIndex].PreviousIndex != nilIndex {
+		this.nodes[this.nodes[toIndex].PreviousIndex].NextIndex = toIndex
+	} else {
+		this.headIndex = toIndex
+	}
+
+	if this.nodes[toIndex].NextIndex != nilIndex {
+		this.nodes[this.nodes[toIndex].NextIndex].PreviousIndex = toIndex
+	} else {
+		this.tailIndex = toIndex
+	}
+
+	this.nodes[fromIndex].Index = -1
+	this.values[fromIndex] = *new(T)
+}
+
 func (this *LinkedList[T]) swapNodes(indexA int, indexB int) {
+	this.crystallized = false
+	nodeA := &this.nodes[indexA]
+	nodeB := &this.nodes[indexB]
+
+	if nodeA.Index != -1 && nodeB.Index != -1 {
+		this.swapInUseNodes(indexA, indexB)
+		return
+	}
+
+	if nodeA.Index == -1 && nodeB.Index != -1 {
+		this.moveNodeToLocation(indexB, indexA)
+	} else if nodeA.Index != -1 && nodeB.Index == -1 {
+		this.moveNodeToLocation(indexA, indexB)
+	}
+}
+
+func (this *LinkedList[T]) swapInUseNodes(indexA int, indexB int) {
+	this.crystallized = false
 	beforePointer := this.nodes[indexA].PreviousIndex
 	if beforePointer == nilIndex {
 		this.headIndex = indexB
@@ -632,8 +740,6 @@ func (this *LinkedList[T]) swapNodes(indexA int, indexB int) {
 	nodeA.PreviousIndex = indexB
 	nodeB.NextIndex = indexA
 	nodeB.PreviousIndex = beforePointer
-	nodeA.Index = indexB
-	nodeB.Index = indexA
 
 	this.values[indexA], this.values[indexB] = this.values[indexB], this.values[indexA]
 }

@@ -1,7 +1,7 @@
 package _ll
 
 type Node struct {
-	Index         int
+	Index         int // -1 indicates this node is not in use
 	NextIndex     int // -1 indicates nil
 	PreviousIndex int // -1 indicates nil
 }

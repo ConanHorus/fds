@@ -496,3 +496,212 @@ func BenchmarkBuddyAllocator_Free(b *testing.B) {
 		})).
 		Run()
 }
+
+// --- AllocateAt Tests ---
+
+func TestAllocateAt_BasicFunctionality(t *testing.T) {
+	allocator := NewBuddyAllocator(WithInitialCapacity(64), WithMaxOrder(6))
+
+	// Test successful allocation at specific locations
+	testCases := []struct {
+		name     string
+		index    uint64
+		size     uint64
+		expectOK bool
+	}{
+		{"allocate 1 byte at index 0", 0, 1, true},
+		{"allocate 2 bytes at index 2", 2, 2, true},
+		{"allocate 4 bytes at index 4", 4, 4, true},
+		{"allocate 8 bytes at index 8", 8, 8, true},
+		{"allocate 1 byte at index 16", 16, 1, true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assertions.New(t)
+			initialUsed := allocator.Used()
+
+			ok := allocator.AllocateAt(tc.index, tc.size)
+			assert.So(ok, should.Equal, tc.expectOK)
+
+			if tc.expectOK {
+				assert.So(allocator.Used(), should.Equal, initialUsed+tc.size)
+			} else {
+				assert.So(allocator.Used(), should.Equal, initialUsed)
+			}
+		})
+	}
+}
+
+func TestAllocateAt_InvalidInputs(t *testing.T) {
+	allocator := NewBuddyAllocator(WithInitialCapacity(64), WithMaxOrder(6))
+
+	testCases := []struct {
+		name  string
+		index uint64
+		size  uint64
+	}{
+		{"zero size", 0, 0},
+		{"out of bounds index", 100, 1},
+		{"index at capacity boundary", 64, 1},
+		{"negative equivalent index", ^uint64(0), 1},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assertions.New(t)
+			initialUsed := allocator.Used()
+
+			ok := allocator.AllocateAt(tc.index, tc.size)
+			assert.So(ok, should.BeFalse)
+			assert.So(allocator.Used(), should.Equal, initialUsed)
+		})
+	}
+}
+
+func TestAllocateAt_AlignmentRequirements(t *testing.T) {
+	testCases := []struct {
+		name     string
+		index    uint64
+		size     uint64
+		expectOK bool
+		reason   string
+	}{
+		{"1-byte block at index 0", 0, 1, true, "any index is 1-aligned"},
+		{"1-byte block at index 1", 1, 1, true, "any index is 1-aligned"},
+		{"2-byte block at index 0", 0, 2, true, "index 0 is 2-aligned"},
+		{"2-byte block at index 2", 2, 2, true, "index 2 is 2-aligned"},
+		{"2-byte block at index 1", 1, 2, false, "index 1 is not 2-aligned"},
+		{"4-byte block at index 0", 0, 4, true, "index 0 is 4-aligned"},
+		{"4-byte block at index 4", 4, 4, true, "index 4 is 4-aligned"},
+		{"4-byte block at index 2", 2, 4, false, "index 2 is not 4-aligned"},
+		{"8-byte block at index 0", 0, 8, true, "index 0 is 8-aligned"},
+		{"8-byte block at index 8", 8, 8, true, "index 8 is 8-aligned"},
+		{"8-byte block at index 4", 4, 8, false, "index 4 is not 8-aligned"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assertions.New(t)
+			allocator := NewBuddyAllocator(WithInitialCapacity(64), WithMaxOrder(6))
+
+			ok := allocator.AllocateAt(tc.index, tc.size)
+			assert.So(ok, should.Equal, tc.expectOK)
+		})
+	}
+}
+
+func TestAllocateAt_OverlappingAllocations(t *testing.T) {
+	assert := assertions.New(t)
+	allocator := NewBuddyAllocator(WithInitialCapacity(64), WithMaxOrder(6))
+
+	// First allocation should succeed
+	ok := allocator.AllocateAt(0, 4)
+	assert.So(ok, should.BeTrue)
+
+	// Overlapping allocations should fail
+	testCases := []struct {
+		name  string
+		index uint64
+		size  uint64
+	}{
+		{"exact same location", 0, 4},
+		{"overlapping start", 2, 4},
+		{"contained within", 1, 2},
+		{"overlapping end", 0, 8},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assertions.New(t)
+			ok := allocator.AllocateAt(tc.index, tc.size)
+			assert.So(ok, should.BeFalse)
+		})
+	}
+
+	// Non-overlapping allocation should succeed
+	ok = allocator.AllocateAt(4, 4)
+	assert.So(ok, should.BeTrue)
+}
+
+func TestAllocateAt_WithFreeAndReuse(t *testing.T) {
+	assert := assertions.New(t)
+	allocator := NewBuddyAllocator(WithInitialCapacity(64), WithMaxOrder(6))
+
+	// Allocate at specific location
+	ok := allocator.AllocateAt(8, 4)
+	assert.So(ok, should.BeTrue)
+	assert.So(allocator.Used(), should.Equal, 4)
+
+	// Free the allocation
+	ok = allocator.Free(8, 4)
+	assert.So(ok, should.BeTrue)
+	assert.So(allocator.Used(), should.Equal, 0)
+
+	// Should be able to allocate at the same location again
+	ok = allocator.AllocateAt(8, 4)
+	assert.So(ok, should.BeTrue)
+	assert.So(allocator.Used(), should.Equal, 4)
+
+	// Test with a fresh allocator for the larger block case
+	// (since fragmentation prevents reusing the same allocator)
+	freshAllocator := NewBuddyAllocator(WithInitialCapacity(64), WithMaxOrder(6))
+	ok = freshAllocator.AllocateAt(0, 16)
+	assert.So(ok, should.BeTrue)
+	assert.So(freshAllocator.Used(), should.Equal, 16)
+}
+
+func TestAllocateAt_BlockSplitting(t *testing.T) {
+	assert := assertions.New(t)
+	allocator := NewBuddyAllocator(WithInitialCapacity(64), WithMaxOrder(6))
+
+	// The initial free list should have one 64-byte block
+	// Allocating 4 bytes at index 8 should split blocks appropriately
+	ok := allocator.AllocateAt(8, 4)
+	assert.So(ok, should.BeTrue)
+
+	// After allocation, we should be able to allocate other sizes
+	// in the remaining free spaces
+	ok = allocator.AllocateAt(0, 8) // Should work - space before our allocation
+	assert.So(ok, should.BeTrue)
+
+	ok = allocator.AllocateAt(12, 4) // Should work - space after our allocation
+	assert.So(ok, should.BeTrue)
+
+	totalUsed := uint64(4 + 8 + 4)
+	assert.So(allocator.Used(), should.Equal, totalUsed)
+}
+
+func TestAllocateAt_ExtendsBeyondCapacity(t *testing.T) {
+	allocator := NewBuddyAllocator(WithInitialCapacity(64), WithMaxOrder(6))
+
+	// Try to allocate a block that would extend beyond capacity
+	testCases := []struct {
+		name  string
+		index uint64
+		size  uint64
+	}{
+		{"block extends beyond capacity", 60, 8},
+		{"block starts at last valid index", 63, 1},
+		{"large block at end", 32, 64},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assertions.New(t)
+			ok := allocator.AllocateAt(tc.index, tc.size)
+			if tc.index+tc.size <= 64 {
+				// Should succeed if within bounds and properly aligned
+				requiredBlockSize := uint64(1) << orderOf(tc.size)
+				if tc.index%requiredBlockSize == 0 && tc.index+requiredBlockSize <= 64 {
+					assert.So(ok, should.BeTrue)
+				} else {
+					assert.So(ok, should.BeFalse)
+				}
+			} else {
+				// Should fail if extends beyond capacity
+				assert.So(ok, should.BeFalse)
+			}
+		})
+	}
+}

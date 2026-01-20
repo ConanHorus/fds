@@ -136,6 +136,90 @@ func (this *BuddyAllocator) Allocate(size uint64) (index uint64, grew bool, ok b
 	return index, grew, ok
 }
 
+// AllocateAt allocates a memory block of the specified size at the specified index.
+//
+// This method attempts to allocate a block at a specific memory location. The
+// allocation will only succeed if the requested location is available and
+// properly aligned for the block size.
+//
+// Examples:
+//   - AllocateAt(0, 1) allocates a 1-unit block at index 0
+//   - AllocateAt(8, 4) allocates a 4-unit block at index 8 (must be 4-aligned)
+//   - AllocateAt(3, 4) returns false (not 4-aligned)
+//
+// Parameters:
+//   - index: The starting index where the block should be allocated (must be
+//     properly aligned for the block size and < Capacity)
+//   - size: The size of the memory block to allocate (must be > 0)
+//
+// Returns:
+//   - ok: A boolean indicating whether the allocation was successful. A false
+//     result indicates the location is not available, not aligned, or out of
+//     bounds
+func (this *BuddyAllocator) AllocateAt(index uint64, size uint64) (ok bool) {
+	if size == 0 {
+		return false
+	}
+
+	if index >= this.state.Capacity {
+		return false
+	}
+
+	requiredOrder := orderOf(size)
+	blockSize := uint64(1) << requiredOrder
+
+	if index%blockSize != 0 {
+		return false
+	}
+
+	if index+blockSize > this.state.Capacity {
+		return false
+	}
+
+	for order := requiredOrder; order <= this.state.MaxOrder; order++ {
+		blockSizeForOrder := uint64(1) << order
+
+		if freeIndexPos, found := sorted.GallopingSearch(this.freeLists[order], index); found {
+			this.freeLists[order] = append(this.freeLists[order][:freeIndexPos], this.freeLists[order][freeIndexPos+1:]...)
+
+			currentIndex := index
+			for currentOrder := order; currentOrder > requiredOrder; currentOrder-- {
+				buddySize := uint64(1) << (currentOrder - 1)
+				buddyIndex := currentIndex + buddySize
+				this.freeLists[currentOrder-1] = sorted.Insert(this.freeLists[currentOrder-1], buddyIndex, false)
+			}
+
+			this.used += size
+			return true
+		}
+
+		for i, freeIndex := range this.freeLists[order] {
+			if freeIndex <= index && index+blockSize <= freeIndex+blockSizeForOrder {
+				this.freeLists[order] = append(this.freeLists[order][:i], this.freeLists[order][i+1:]...)
+
+				if freeIndex < index {
+					beforeSize := index - freeIndex
+					beforeOrder := orderOf(beforeSize)
+					this.addFreeBlocks(freeIndex, beforeSize, beforeOrder)
+				}
+
+				afterIndex := index + blockSize
+				afterEnd := freeIndex + blockSizeForOrder
+				if afterIndex < afterEnd {
+					afterSize := afterEnd - afterIndex
+					afterOrder := orderOf(afterSize)
+					this.addFreeBlocks(afterIndex, afterSize, afterOrder)
+				}
+
+				this.used += size
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // Capacity returns the total capacity of the BuddyAllocator.
 //
 // Returns:
@@ -246,6 +330,25 @@ func (this *BuddyAllocator) Used() uint64 {
 }
 
 // --- private methods --- //
+
+func (this *BuddyAllocator) addFreeBlocks(startIndex uint64, size uint64, maxOrder uint8) {
+	currentIndex := startIndex
+	remainingSize := size
+
+	for remainingSize > 0 && maxOrder <= this.state.MaxOrder {
+		blockSize := uint64(1) << maxOrder
+
+		if remainingSize >= blockSize && currentIndex%blockSize == 0 {
+			this.freeLists[maxOrder] = sorted.Insert(this.freeLists[maxOrder], currentIndex, false)
+			currentIndex += blockSize
+			remainingSize -= blockSize
+		} else if maxOrder > 0 {
+			maxOrder--
+		} else {
+			break
+		}
+	}
+}
 
 func (this *BuddyAllocator) grow() uint64 {
 	newMemoryIndex := this.state.Capacity
