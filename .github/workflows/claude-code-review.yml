@@ -26,6 +26,8 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: "Review this PR for bugs, correctness issues, and code quality. Check for edge cases in algorithms, unused code, and missing interface compliance."
+          show_full_output: "true"
+          display_report: "true"
 
   respond:
     if: >
