@@ -28,10 +28,8 @@ jobs:
           prompt: |
             Review this PR for bugs, correctness issues, and code quality.
             Check for edge cases in algorithms, unused code, and missing interface compliance.
-            Post your review findings as a comment on this PR using the GitHub CLI:
-            gh pr comment ${{ github.event.pull_request.number }} --body "<your review>"
+          track_progress: "true"
           show_full_output: "true"
-          display_report: "true"
 
   respond:
     if: >
